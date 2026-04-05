@@ -7,11 +7,14 @@ import com.tianzhi.ontopengine.model.ExtractMetadataResponse;
 import com.tianzhi.ontopengine.model.ValidateRequest;
 import com.tianzhi.ontopengine.model.ValidateResponse;
 import com.tianzhi.ontopengine.service.OntopEngineService;
+import org.springframework.scheduling.annotation.Async;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+
+import java.util.concurrent.CompletableFuture;
 
 @RestController
 @Validated
@@ -24,18 +27,29 @@ public class OntopController {
         this.ontopEngineService = ontopEngineService;
     }
 
+    /**
+     * 异步提取数据库元数据，防止耗尽 Web 容器主线程
+     */
+    @Async("ontopTaskExecutor")
     @PostMapping("/extract-metadata")
-    public ExtractMetadataResponse extractMetadata(@RequestBody ExtractMetadataRequest request) {
-        return ontopEngineService.extractMetadata(request);
+    public CompletableFuture<ExtractMetadataResponse> extractMetadata(@RequestBody ExtractMetadataRequest request) throws Exception {
+        return CompletableFuture.completedFuture(ontopEngineService.extractMetadata(request));
     }
 
+    /**
+     * 异步 Bootstrap 操作
+     */
+    @Async("ontopTaskExecutor")
     @PostMapping("/bootstrap")
-    public BootstrapResponse bootstrap(@RequestBody BootstrapRequest request) {
-        return ontopEngineService.bootstrap(request);
+    public CompletableFuture<BootstrapResponse> bootstrap(@RequestBody BootstrapRequest request) throws Exception {
+        return CompletableFuture.completedFuture(ontopEngineService.bootstrap(request));
     }
 
+    /**
+     * 快速的校验可以使用原生的同步机制
+     */
     @PostMapping("/validate")
-    public ValidateResponse validate(@RequestBody ValidateRequest request) {
+    public ValidateResponse validate(@RequestBody ValidateRequest request) throws Exception {
         return ontopEngineService.validate(request);
     }
 }

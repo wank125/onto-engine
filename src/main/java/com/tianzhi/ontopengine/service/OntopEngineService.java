@@ -21,12 +21,11 @@ import org.semanticweb.owlapi.model.IRI;
 import org.semanticweb.owlapi.model.OWLNamedObject;
 import org.semanticweb.owlapi.model.OWLOntology;
 import org.semanticweb.owlapi.model.OWLOntologyCreationException;
+import org.springframework.cache.annotation.Cacheable;
 import org.springframework.stereotype.Service;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.io.OutputStreamWriter;
-import java.io.PrintWriter;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -37,32 +36,38 @@ import static java.util.stream.Collectors.toSet;
 @Service
 public class OntopEngineService {
 
-    public ExtractMetadataResponse extractMetadata(ExtractMetadataRequest request) {
+    /**
+     * 探测数据库结构元数据
+     * （抛出的异常会由全局拦截器自动返回 400 状态码，上游直接处理而不再静默吞噬）
+     */
+    public ExtractMetadataResponse extractMetadata(ExtractMetadataRequest request) throws Exception {
         ExtractMetadataResponse response = new ExtractMetadataResponse();
-        try {
-            OntopMappingSQLConfiguration configuration = mappingConfiguration(request.getJdbc()).build();
-            Injector injector = configuration.getInjector();
-            DBMetadataExtractorAndSerializer extractor = injector.getInstance(DBMetadataExtractorAndSerializer.class);
-            response.setSuccess(true);
-            response.setMetadataJson(extractor.extractAndSerialize());
-            response.setMessage("Metadata extraction completed");
-            return response;
-        }
-        catch (Exception e) {
-            response.setSuccess(false);
-            response.setMessage(stackTrace(e));
-            return response;
-        }
+        
+        // 使用缓存获取重量级的 Configuration 以省去重复初始化开销
+        OntopMappingSQLConfiguration configuration = getMappingConfiguration(request.getJdbc());
+        Injector injector = configuration.getInjector();
+        
+        DBMetadataExtractorAndSerializer extractor = injector.getInstance(DBMetadataExtractorAndSerializer.class);
+        response.setSuccess(true);
+        response.setMetadataJson(extractor.extractAndSerialize());
+        response.setMessage("Metadata extraction completed");
+        
+        return response;
     }
 
-    public BootstrapResponse bootstrap(BootstrapRequest request) {
+    /**
+     * 根据关系库结构引导生成（Bootstrap）初版本体和映射
+     */
+    public BootstrapResponse bootstrap(BootstrapRequest request) throws Exception {
         BootstrapResponse response = new BootstrapResponse();
         Path mappingFile = null;
         try {
-            OntopSQLOWLAPIConfiguration configuration = owlConfiguration(request.getJdbc()).build();
+            OntopSQLOWLAPIConfiguration configuration = getOwlConfiguration(request.getJdbc());
             DirectMappingBootstrapper.BootstrappingResults results =
                     DirectMappingBootstrapper.defaultBootstrapper().bootstrap(configuration, request.getBaseIri());
 
+            // 临时文件写入以支持 Ontop 原生组件的对标。
+            // 使用系统原生临时机制（重启易释放），由于 OntopNativeMappingSerializer 当前仅限 File 入参，这是最安全稳妥的方案
             mappingFile = Files.createTempFile("ontop-bootstrap-", ".obda");
             OntopNativeMappingSerializer serializer = new OntopNativeMappingSerializer();
             serializer.write(mappingFile.toFile(), results.getPPMapping());
@@ -79,18 +84,15 @@ public class OntopEngineService {
             response.setOntology(ontologyOut.toString(StandardCharsets.UTF_8));
             response.setMessage("Bootstrap completed");
             return response;
-        }
-        catch (Exception e) {
-            response.setSuccess(false);
-            response.setMessage(stackTrace(e));
-            return response;
-        }
-        finally {
+        } finally {
             deleteIfExists(mappingFile);
         }
     }
 
-    public ValidateResponse validate(ValidateRequest request) {
+    /**
+     * 验证 OBDA 与本体文件之间是否规范无异议
+     */
+    public ValidateResponse validate(ValidateRequest request) throws Exception {
         ValidateResponse response = new ValidateResponse();
         Path mappingFile = null;
         Path ontologyFile = null;
@@ -100,7 +102,11 @@ public class OntopEngineService {
             Files.writeString(mappingFile, request.getMappingContent(), StandardCharsets.UTF_8);
             Files.writeString(ontologyFile, request.getOntologyContent(), StandardCharsets.UTF_8);
 
-            OntopSQLOWLAPIConfiguration configuration = owlConfiguration(request.getJdbc())
+            OntopSQLOWLAPIConfiguration configuration = OntopSQLOWLAPIConfiguration.defaultBuilder()
+                    .jdbcUrl(request.getJdbc().getJdbcUrl())
+                    .jdbcUser(request.getJdbc().getUser())
+                    .jdbcPassword(request.getJdbc().getPassword())
+                    .jdbcDriver(request.getJdbc().getDriver())
                     .ontologyFile(ontologyFile.toString())
                     .nativeOntopMappingFile(mappingFile.toString())
                     .build();
@@ -112,32 +118,36 @@ public class OntopEngineService {
             response.setSuccess(true);
             response.setMessage("Validation completed");
             return response;
-        }
-        catch (Exception e) {
-            response.setSuccess(false);
-            response.setMessage(stackTrace(e));
-            return response;
-        }
-        finally {
+        } finally {
             deleteIfExists(mappingFile);
             deleteIfExists(ontologyFile);
         }
     }
 
-    private OntopMappingSQLConfiguration.Builder<?> mappingConfiguration(JdbcConfig jdbc) {
+    /**
+     * 缓存 MappingConfiguration 建造者，极大减轻热点探测时 Guice Injector DI 的冷启动损耗
+     */
+    @Cacheable(value = "ontopConfiguration", key = "#jdbc.jdbcUrl + '-' + #jdbc.user")
+    public OntopMappingSQLConfiguration getMappingConfiguration(JdbcConfig jdbc) {
         return OntopMappingSQLConfiguration.defaultBuilder()
                 .jdbcUrl(jdbc.getJdbcUrl())
                 .jdbcUser(jdbc.getUser())
                 .jdbcPassword(jdbc.getPassword())
-                .jdbcDriver(jdbc.getDriver());
+                .jdbcDriver(jdbc.getDriver())
+                .build();
     }
 
-    private OntopSQLOWLAPIConfiguration.Builder<?> owlConfiguration(JdbcConfig jdbc) {
+    /**
+     * 缓存 OWLConfiguration 机制同理
+     */
+    @Cacheable(value = "ontopConfiguration", key = "#jdbc.jdbcUrl + '-' + #jdbc.user + '-owl'")
+    public OntopSQLOWLAPIConfiguration getOwlConfiguration(JdbcConfig jdbc) {
         return OntopSQLOWLAPIConfiguration.defaultBuilder()
                 .jdbcUrl(jdbc.getJdbcUrl())
                 .jdbcUser(jdbc.getUser())
                 .jdbcPassword(jdbc.getPassword())
-                .jdbcDriver(jdbc.getDriver());
+                .jdbcDriver(jdbc.getDriver())
+                .build();
     }
 
     private void validatePunning(OWLOntology ontology) throws OBDASpecificationException, OWLOntologyCreationException {
@@ -160,22 +170,13 @@ public class OntopEngineService {
         }
     }
 
-    private String stackTrace(Exception e) {
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        PrintWriter writer = new PrintWriter(new OutputStreamWriter(out, StandardCharsets.UTF_8));
-        e.printStackTrace(writer);
-        writer.flush();
-        return out.toString(StandardCharsets.UTF_8);
-    }
-
     private void deleteIfExists(Path path) {
         if (path == null) {
             return;
         }
         try {
             Files.deleteIfExists(path);
-        }
-        catch (IOException ignored) {
+        } catch (IOException ignored) {
         }
     }
 }

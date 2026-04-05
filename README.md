@@ -156,7 +156,15 @@ docker run --rm -p 8081:8081 onto-engine
 - `DirectMappingBootstrapper`
 - `OntopSQLOWLAPIConfiguration`
 
-这意味着它是一个真正的 Native Java Ontop service，而不是“CLI 套壳服务”。
+这意味它是一个真正的 Native Java Ontop service，而不是“CLI 套壳服务”。
+
+### 性能与高并发优化设定 (v0.1.0)
+为了在真实的企业图谱场景中保持高可用和低延迟，服务内集成了以下云原生优化：
+
+1. **Docker 自适应内存**：取消了硬编码的 `-Xmx`，升级为 `-XX:MaxRAMPercentage=75.0`。可在 `docker-compose.yml` 中无缝弹性调整容器内存限额。
+2. **LRU 配置缓存 (Caffeine)**：因 Ontop `Injector` 在使用 `build()` 时会有长达数百毫秒的 DI 依赖注入与 JDBC 池初始化耗时。服务内部使用了 Caffeine 缓存机制，对经常访问同配置数据源的操作实现了 **零冷启动延迟**。
+3. **全局防雪崩拦截 (Global Exception HTTP 400)**：自动捕获 Ontop 底层各种诸如连接失败、冲突等异常，优雅降级返回 HTTP 400 而不是默认 HTTP 200，保证上游 Python 端 `httpx.HTTPStatusError` 的精准处理。
+4. **异步队列隔离 (@Async)**：针对 `ExtractMetadata` 和 `Bootstrap` 这种潜在耗时操作，配置了专用的带界（Bounded）线程池 `ontopTaskExecutor`，保护主 Web 容器 (Tomcat) 线程池不被阻塞榨干。
 
 ## 与 `ontop-ui` 的关系
 

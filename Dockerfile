@@ -12,4 +12,4 @@ COPY --from=build /app/target/ontop-engine-0.1.0.jar /app/ontop-engine.jar
 
 EXPOSE 8081
 
-ENTRYPOINT ["java", "-Xms512m", "-Xmx2g", "-jar", "/app/ontop-engine.jar"]
+ENTRYPOINT ["java", "-XX:MaxRAMPercentage=75.0", "-jar", "/app/ontop-engine.jar"]
