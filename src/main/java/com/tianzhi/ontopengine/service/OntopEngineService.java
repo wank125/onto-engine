@@ -8,13 +8,20 @@ import com.tianzhi.ontopengine.model.BootstrapResponse;
 import com.tianzhi.ontopengine.model.ExtractMetadataRequest;
 import com.tianzhi.ontopengine.model.ExtractMetadataResponse;
 import com.tianzhi.ontopengine.model.JdbcConfig;
+import com.tianzhi.ontopengine.model.ParseMappingRequest;
+import com.tianzhi.ontopengine.model.ParseMappingResponse;
+import com.tianzhi.ontopengine.model.ParseMappingRule;
 import com.tianzhi.ontopengine.model.ValidateRequest;
 import com.tianzhi.ontopengine.model.ValidateResponse;
 import it.unibz.inf.ontop.exception.OBDASpecificationException;
 import it.unibz.inf.ontop.injection.OntopMappingSQLConfiguration;
 import it.unibz.inf.ontop.injection.OntopSQLOWLAPIConfiguration;
 import it.unibz.inf.ontop.spec.dbschema.tools.DBMetadataExtractorAndSerializer;
+import it.unibz.inf.ontop.spec.mapping.parser.impl.OntopNativeMappingParser;
 import it.unibz.inf.ontop.spec.mapping.bootstrap.DirectMappingBootstrapper;
+import it.unibz.inf.ontop.spec.mapping.pp.PreProcessedMapping;
+import it.unibz.inf.ontop.spec.mapping.pp.PreProcessedTriplesMap;
+import it.unibz.inf.ontop.spec.mapping.pp.SQLPPTriplesMap;
 import it.unibz.inf.ontop.spec.mapping.serializer.impl.OntopNativeMappingSerializer;
 import org.semanticweb.owlapi.formats.TurtleDocumentFormat;
 import org.semanticweb.owlapi.model.IRI;
@@ -26,9 +33,13 @@ import org.springframework.stereotype.Service;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.StringReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Set;
 
 import static java.util.stream.Collectors.toSet;
@@ -124,6 +135,26 @@ public class OntopEngineService {
         }
     }
 
+    public ParseMappingResponse parseMapping(ParseMappingRequest request) throws Exception {
+        OntopNativeMappingParser parser = getParserConfiguration().getInjector().getInstance(OntopNativeMappingParser.class);
+        PreProcessedMapping<? extends PreProcessedTriplesMap> parsed = parser.parse(new StringReader(request.getMappingContent()));
+
+        ParseMappingResponse response = new ParseMappingResponse();
+        response.setSuccess(true);
+        response.setMessage("Mapping parsed");
+        response.setPrefixes(new LinkedHashMap<>(parsed.getPrefixManager().getPrefixMap()));
+
+        List<ParseMappingRule> mappings = new ArrayList<>();
+        for (PreProcessedTriplesMap triplesMap : parsed.getTripleMaps()) {
+            if (!(triplesMap instanceof SQLPPTriplesMap)) {
+                continue;
+            }
+            mappings.add(toParseMappingRule((SQLPPTriplesMap) triplesMap));
+        }
+        response.setMappings(mappings);
+        return response;
+    }
+
     /**
      * 缓存 MappingConfiguration 建造者，极大减轻热点探测时 Guice Injector DI 的冷启动损耗
      */
@@ -147,6 +178,16 @@ public class OntopEngineService {
                 .jdbcUser(jdbc.getUser())
                 .jdbcPassword(jdbc.getPassword())
                 .jdbcDriver(jdbc.getDriver())
+                .build();
+    }
+
+    @Cacheable("ontopParserConfiguration")
+    public OntopMappingSQLConfiguration getParserConfiguration() {
+        return OntopMappingSQLConfiguration.defaultBuilder()
+                .jdbcUrl("jdbc:postgresql://127.0.0.1:1/ontop_parser")
+                .jdbcUser("ontop")
+                .jdbcPassword("ontop")
+                .jdbcDriver("org.postgresql.Driver")
                 .build();
     }
 
@@ -178,5 +219,13 @@ public class OntopEngineService {
             Files.deleteIfExists(path);
         } catch (IOException ignored) {
         }
+    }
+
+    private ParseMappingRule toParseMappingRule(SQLPPTriplesMap triplesMap) {
+        ParseMappingRule rule = new ParseMappingRule();
+        rule.setMappingId(triplesMap.getId());
+        rule.setTarget(triplesMap.getOptionalTargetString().orElse(""));
+        rule.setSource(triplesMap.getSourceQuery().getSQL());
+        return rule;
     }
 }

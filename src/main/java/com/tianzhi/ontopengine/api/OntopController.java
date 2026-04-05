@@ -4,6 +4,8 @@ import com.tianzhi.ontopengine.model.BootstrapRequest;
 import com.tianzhi.ontopengine.model.BootstrapResponse;
 import com.tianzhi.ontopengine.model.ExtractMetadataRequest;
 import com.tianzhi.ontopengine.model.ExtractMetadataResponse;
+import com.tianzhi.ontopengine.model.ParseMappingRequest;
+import com.tianzhi.ontopengine.model.ParseMappingResponse;
 import com.tianzhi.ontopengine.model.ValidateRequest;
 import com.tianzhi.ontopengine.model.ValidateResponse;
 import com.tianzhi.ontopengine.service.OntopEngineService;
@@ -51,5 +53,10 @@ public class OntopController {
     @PostMapping("/validate")
     public ValidateResponse validate(@RequestBody ValidateRequest request) throws Exception {
         return ontopEngineService.validate(request);
+    }
+
+    @PostMapping("/parse-mapping")
+    public ParseMappingResponse parseMapping(@RequestBody ParseMappingRequest request) throws Exception {
+        return ontopEngineService.parseMapping(request);
     }
 }
