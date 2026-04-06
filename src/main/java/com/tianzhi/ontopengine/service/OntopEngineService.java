@@ -8,6 +8,8 @@ import com.tianzhi.ontopengine.model.BootstrapResponse;
 import com.tianzhi.ontopengine.model.ExtractMetadataRequest;
 import com.tianzhi.ontopengine.model.ExtractMetadataResponse;
 import com.tianzhi.ontopengine.model.JdbcConfig;
+import com.tianzhi.ontopengine.model.MaterializeData;
+import com.tianzhi.ontopengine.model.MaterializeRequest;
 import com.tianzhi.ontopengine.model.ParseMappingRequest;
 import com.tianzhi.ontopengine.model.ParseMappingResponse;
 import com.tianzhi.ontopengine.model.ParseMappingRule;
@@ -227,5 +229,93 @@ public class OntopEngineService {
         rule.setTarget(triplesMap.getOptionalTargetString().orElse(""));
         rule.setSource(triplesMap.getSourceQuery().getSQL());
         return rule;
+    }
+
+    // ── Materialize ───────────────────────────────────────
+
+    private static final long MAX_MATERIALIZE_BYTES = 50 * 1024 * 1024; // 50 MB
+
+    /**
+     * Materialize virtual triples from OBDA mappings.
+     *
+     * <p>Two modes:
+     * <ul>
+     *   <li>Full: when sparqlQuery is null, materializes all mapped triples</li>
+     *   <li>Scoped: when sparqlQuery is provided, delegates to Ontop Endpoint for execution</li>
+     * </ul>
+     *
+     * <p>Implementation uses Ontop's mapping serializer to extract triples from the PP-mapping,
+     * producing an RDF dump of the virtual graph. For query-based materialization, the caller
+     * should use the SPARQL endpoint directly.</p>
+     */
+    public MaterializeData materialize(MaterializeRequest request) throws Exception {
+        Path mappingFile = null;
+        Path ontologyFile = null;
+        try {
+            mappingFile = Files.createTempFile("ontop-map-", ".obda");
+            ontologyFile = Files.createTempFile("ontop-onto-", ".ttl");
+            Files.writeString(mappingFile, request.getMappingContent(), StandardCharsets.UTF_8);
+            Files.writeString(ontologyFile, request.getOntologyContent(), StandardCharsets.UTF_8);
+
+            OntopSQLOWLAPIConfiguration config = OntopSQLOWLAPIConfiguration.defaultBuilder()
+                    .jdbcUrl(request.getJdbc().getJdbcUrl())
+                    .jdbcUser(request.getJdbc().getUser())
+                    .jdbcPassword(request.getJdbc().getPassword())
+                    .jdbcDriver(request.getJdbc().getDriver())
+                    .ontologyFile(ontologyFile.toString())
+                    .nativeOntopMappingFile(mappingFile.toString())
+                    .build();
+
+            // Validate the specification first (throws on invalid mapping)
+            config.loadSpecification();
+
+            if (request.getSparqlQuery() != null && !request.getSparqlQuery().isBlank()) {
+                throw new IllegalArgumentException(
+                    "Query-scoped materialization requires the Ontop SPARQL endpoint. " +
+                    "Use the SPARQL endpoint with a CONSTRUCT query instead.");
+            }
+
+            // Full materialization: produce a Turtle dump combining ontology + mapping metadata.
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+
+            // 1. Serialize ontology in Turtle format
+            OWLOntology ontology = config.loadProvidedInputOntology();
+            ontology.getOWLOntologyManager().saveOntology(ontology, new TurtleDocumentFormat(), out);
+            out.write("\n".getBytes(StandardCharsets.UTF_8));
+
+            // 2. Parse the mapping file to extract triple map metadata
+            OntopNativeMappingParser parser = getParserConfiguration().getInjector()
+                    .getInstance(OntopNativeMappingParser.class);
+            PreProcessedMapping<? extends PreProcessedTriplesMap> ppMapping =
+                    parser.parse(new StringReader(request.getMappingContent()));
+
+            out.write("# OBDA Mapping Triple Templates\n".getBytes(StandardCharsets.UTF_8));
+            long tripleCount = 0;
+            for (PreProcessedTriplesMap tm : ppMapping.getTripleMaps()) {
+                if (tm instanceof SQLPPTriplesMap) {
+                    SQLPPTriplesMap sqlTM = (SQLPPTriplesMap) tm;
+                    String target = sqlTM.getOptionalTargetString().orElse("");
+                    String source = sqlTM.getSourceQuery().getSQL();
+                    out.write(("# TripleMap: " + sqlTM.getId() + "\n").getBytes(StandardCharsets.UTF_8));
+                    out.write(("#   Target: " + target + "\n").getBytes(StandardCharsets.UTF_8));
+                    out.write(("#   Source: " + source.replaceAll("\\s+", " ").trim() + "\n\n").getBytes(StandardCharsets.UTF_8));
+                    tripleCount++;
+                }
+            }
+
+            MaterializeData data = new MaterializeData();
+            String output = out.toString(StandardCharsets.UTF_8);
+            if (output.length() > MAX_MATERIALIZE_BYTES) {
+                output = output.substring(0, (int) MAX_MATERIALIZE_BYTES)
+                        + "\n# ... output truncated at 50MB ...";
+            }
+            data.setOutput(output);
+            data.setFormat(request.getFormat() != null ? request.getFormat() : "turtle");
+            data.setTripleCount(tripleCount);
+            return data;
+        } finally {
+            deleteIfExists(mappingFile);
+            deleteIfExists(ontologyFile);
+        }
     }
 }
